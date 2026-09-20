@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# verify —— 可执行验收服务
+#
+# 依序执行：环境检查 → 依赖安装 → 类型检查 → 求解器单元测试 → 生产构建
+# → Docker 交付物静态检查 →（可选）Docker 镜像构建与容器健康检查。
+# 任一必需步骤失败即以非零码退出。
+#
+# 用法：
+#   ./verify                     完整验收（无 Docker 时自动跳过容器端到端检查）
+#   VERIFY_PORT=18080 ./verify   指定容器端到端检查使用的宿主机端口
+#
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+PASS=0
+FAIL=0
+SKIP=0
+CID=""
+
+log()  { printf '\033[36m[verify]\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m[ PASS ]\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
+bad()  { printf '\033[31m[ FAIL ]\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
+skip() { printf '\033[33m[ SKIP ]\033[0m %s\n' "$*"; SKIP=$((SKIP + 1)); }
+step() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+
+cleanup_container() {
+  if [ -n "$CID" ]; then
+    docker rm -f "$CID" >/dev/null 2>&1 || true
+    CID=""
+  fi
+}
+
+summary() {
+  cleanup_container
+  step "验收汇总"
+  echo "  通过: $PASS  失败: $FAIL  跳过: $SKIP"
+  if [ "$FAIL" -gt 0 ]; then
+    echo "VERIFY: FAIL"
+    exit 1
+  fi
+  echo "VERIFY: PASS"
+}
+trap summary EXIT
+
+# ---------- 1. 运行环境 ----------
+step "1/7 检查 Node.js 与 npm"
+if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+  if [ "$NODE_MAJOR" -ge 18 ]; then
+    ok "node $(node -v) / npm $(npm -v)"
+  else
+    bad "需要 Node.js ≥ 18，当前 $(node -v)"
+    exit 1
+  fi
+else
+  bad "未找到 node / npm"
+  exit 1
+fi
+
+# npm 缓存目录不可写时回退到临时目录（如受限 CI 环境）
+CACHE_DIR="$(npm config get cache 2>/dev/null || true)"
+if [ -z "$CACHE_DIR" ] || ! { mkdir -p "$CACHE_DIR" 2>/dev/null && [ -w "$CACHE_DIR" ]; }; then
+  npm_config_cache="$(mktemp -d /tmp/npm-cache.XXXXXX)"
+  export npm_config_cache
+  log "npm 默认缓存目录不可写，改用 $npm_config_cache"
+fi
+
+# ---------- 2. 依赖安装 ----------
+step "2/7 安装依赖（npm ci）"
+if npm ci --no-audit --no-fund > /tmp/verify-npm-ci.log 2>&1; then
+  ok "依赖安装"
+else
+  bad "npm ci 失败，详见 /tmp/verify-npm-ci.log"
+fi
+
+# ---------- 3. 类型检查 ----------
+step "3/7 TypeScript 类型检查"
+if npx tsc --noEmit; then
+  ok "类型检查"
+else
+  bad "类型检查"
+fi
+
+# ---------- 4. 单元测试 ----------
+step "4/7 求解器单元测试（vitest）"
+if npx vitest run; then
+  ok "单元测试"
+else
+  bad "单元测试"
+fi
+
+# ---------- 5. 生产构建 ----------
+step "5/7 生产构建（vite build）"
+if npx vite build > /tmp/verify-build.log 2>&1 && [ -f dist/index.html ]; then
+  ok "静态构建产物 dist/"
+else
+  bad "构建失败，详见 /tmp/verify-build.log"
+fi
+
+# ---------- 6. Docker 交付物静态检查 ----------
+step "6/7 Docker 交付物静态检查"
+for f in Dockerfile docker-compose.yml nginx.conf .dockerignore; do
+  if [ -f "$f" ]; then ok "存在 $f"; else bad "缺少 $f"; fi
+done
+if grep -q 'HEALTHCHECK' Dockerfile; then
+  ok "Dockerfile 含 HEALTHCHECK"
+else
+  bad "Dockerfile 缺少 HEALTHCHECK"
+fi
+if grep -q 'healthz' nginx.conf; then
+  ok "nginx 暴露 /healthz 健康检查端点"
+else
+  bad "nginx.conf 缺少 /healthz"
+fi
+if grep -q 'healthcheck:' docker-compose.yml; then
+  ok "docker-compose 配置健康检查"
+else
+  bad "docker-compose 缺少健康检查"
+fi
+if grep -Eq '\$\{WEB_PORT' docker-compose.yml; then
+  ok "宿主机端口可配置（WEB_PORT，默认 8080）"
+else
+  bad "docker-compose 宿主机端口不可配置"
+fi
+
+# ---------- 7. Docker 端到端（可选） ----------
+step "7/7 Docker 镜像构建与容器健康检查"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  IMAGE="turnpike-workbench:verify"
+  PORT="${VERIFY_PORT:-18080}"
+
+  if docker build -t "$IMAGE" . > /tmp/verify-docker-build.log 2>&1; then
+    ok "镜像构建 $IMAGE"
+  else
+    bad "镜像构建失败，详见 /tmp/verify-docker-build.log"
+  fi
+
+  CID="$(docker run -d -p "$PORT:80" "$IMAGE")"
+  log "容器 ${CID:0:12} 已启动，宿主机端口 $PORT"
+  READY=0
+  for _ in $(seq 1 30); do
+    if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+      READY=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$READY" = "1" ] && curl -fsS "http://127.0.0.1:$PORT/healthz" | grep -q ok; then
+    ok "健康检查 GET /healthz"
+  else
+    bad "健康检查 GET /healthz"
+  fi
+  if curl -fsS "http://127.0.0.1:$PORT/" | grep -q '<div id="root">'; then
+    ok "静态首页可访问"
+  else
+    bad "静态首页不可访问"
+  fi
+  cleanup_container
+else
+  skip "未检测到可用 Docker 守护进程，跳过镜像构建与容器健康检查"
+fi
