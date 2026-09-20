@@ -1,0 +1,32 @@
+name: turnpike-marker-workbench
+
+services:
+  # 静态 Web 工作台：宿主机端口可通过 WEB_PORT 环境变量配置（默认 8080）
+  web:
+    build:
+      context: .
+      target: web
+    image: turnpike-marker-workbench-web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # 可执行验收服务：运行求解器验收套件并对 Web 做冒烟检查后退出
+  # 用法：docker compose up --build verify   （退出码 0 表示验收通过）
+  verify:
+    build:
+      context: .
+      target: verify
+    image: turnpike-marker-workbench-verify
+    environment:
+      WEB_URL: ${VERIFY_WEB_URL:-http://web}
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: "no"

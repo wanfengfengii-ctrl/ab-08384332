@@ -1,0 +1,27 @@
+{
+  "name": "turnpike-marker-workbench",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "超声导轨校准夹具反射标记布局重建工作台（纯前端 Turnpike 重建）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "build:solver": "esbuild src/solver/index.ts --bundle --platform=node --format=cjs --target=node18 --outfile=verify/solver.bundle.cjs",
+    "verify": "npm run build:solver && node verify/run.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2"
+  }
+}

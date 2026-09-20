@@ -1,0 +1,10 @@
+node_modules
+dist
+verify/solver.bundle.cjs
+.git
+.gitignore
+*.log
+.DS_Store
+.env
+docker-compose.yml
+README.md
